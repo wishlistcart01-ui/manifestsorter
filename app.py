@@ -12,142 +12,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_LEFT
 from datetime import datetime
-
-# ===============================
-# AUTHENTICATION (LOGIN/SIGNUP)
-# ===============================
-
-DATA_DIR = os.getenv("DATA_DIR", "./data")
-USERS_FILE = os.path.join(DATA_DIR, "users.csv")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-def make_hashes(password):
-    return hashlib.sha256(str.encode(password)).hexdigest()
-
-def check_hashes(password, hashed_text):
-    if make_hashes(password) == hashed_text:
-        return True
-    return False
-
-def load_users():
-    if os.path.exists(USERS_FILE):
-        try:
-            return pd.read_csv(USERS_FILE)
-        except:
-            pass
-    return pd.DataFrame(columns=["username", "password"])
-
-def save_users(df):
-    df.to_csv(USERS_FILE, index=False)
-
-def create_user(username, password):
-    users = load_users()
-    if username in users["username"].values:
-        return False
-    new_user = pd.DataFrame([{"username": username, "password": make_hashes(password)}])
-    users = pd.concat([users, new_user], ignore_index=True)
-    save_users(users)
-    return True
-
-def authenticate(username, password):
-    users = load_users()
-    user_row = users[users["username"] == username]
-    if not user_row.empty:
-        if check_hashes(password, user_row.iloc[0]["password"]):
-            return True
-    return False
-
-def login_screen():
-    st.title("🔐 Login to Manifest Sorter")
-    st.caption("Secure your store data on the cloud.")
-    
-    menu = ["Login", "Sign Up"]
-    choice = st.sidebar.selectbox("Authentication Menu", menu)
-
-    if choice == "Login":
-        st.subheader("Login to your account")
-        username = st.text_input("Username")
-        password = st.text_input("Password", type='password')
-        if st.button("Login"):
-            if authenticate(username, password):
-                st.session_state['logged_in'] = True
-                st.session_state['username'] = username
-                st.success(f"Logged in as {username}")
-                st.rerun()
-            else:
-                st.error("Incorrect Username/Password")
-                
-    elif choice == "Sign Up":
-        st.subheader("Create a New Account")
-        new_user = st.text_input("Username")
-        new_password = st.text_input("Password", type='password')
-        if st.button("Sign Up"):
-            if new_user and new_password:
-                if create_user(new_user, new_password):
-                    st.success("✅ Account created successfully!")
-                    st.info("Please go to the Login menu in the sidebar to log in.")
-                else:
-                    st.warning("⚠️ Username already exists. Please choose another one.")
-            else:
-                st.warning("Please enter both username and password.")
-
-
-# ===============================
-# ACCOUNT MANAGEMENT (SCOPED TO USER)
-# ===============================
-
-def get_accounts_file():
-    user = st.session_state['username']
-    return os.path.join(DATA_DIR, f"accounts_{user}.csv")
-
-def load_accounts():
-    file_path = get_accounts_file()
-    if os.path.exists(file_path):
-        try:
-            df = pd.read_csv(file_path)
-            if "account_id" in df.columns and "account_name" in df.columns:
-                return df
-        except Exception:
-            pass
-    return pd.DataFrame(columns=["account_id", "account_name"])
-
-def save_accounts(df):
-    df.to_csv(get_accounts_file(), index=False)
-
-def create_account(name):
-    accounts = load_accounts()
-    name = name.strip()
-    if name == "":
-        return None, "Store name cannot be empty"
-    if name in accounts["account_name"].values:
-        return None, f"Store '{name}' already exists"
-    
-    user = st.session_state['username']
-    base_id = f"{user}_{name.lower().replace(' ', '_').replace('-', '_')}"
-    account_id = base_id
-    i = 2
-    while account_id in accounts["account_id"].values:
-        account_id = f"{base_id}_{i}"
-        i += 1
-        
-    new_row = pd.DataFrame([{"account_id": account_id, "account_name": name}])
-    accounts = pd.concat([accounts, new_row], ignore_index=True)
-    save_accounts(accounts)
-    return account_id, None
-
-def get_account_dir(account_id):
-    path = os.path.join(DATA_DIR, account_id)
-    os.makedirs(path, exist_ok=True)
-    return path
-
-def delete_account(account_id):
-    accounts = load_accounts()
-    accounts = accounts[accounts["account_id"] != account_id]
-    save_accounts(accounts)
-    
-    acc_dir = get_account_dir(account_id)
-    if os.path.exists(acc_dir):
-        shutil.rmtree(acc_dir, ignore_errors=True)
+import requests
+import base64
 
 # ===============================
 # UTILITIES & CONSTANTS
@@ -214,8 +80,8 @@ def variants_match(norm_variant, norm_manifest):
 # 1. REPORT GENERATION FUNCTIONS
 # ===============================
 
-def train_from_excel(file_path):
-    df = pd.read_excel(file_path, header=None)
+def train_from_excel(excel_file):
+    df = pd.read_excel(excel_file, header=None)
     main_row = df.iloc[0]
     sub_row = df.iloc[1]
     mapping = []
@@ -339,9 +205,9 @@ def _merge_broken_pdf_lines(lines):
         i += 1
     return out
 
-def extract_from_pdf(pdf_file_or_path):
+def extract_from_pdf(pdf_file):
     data = []
-    reader = PdfReader(pdf_file_or_path)
+    reader = PdfReader(pdf_file)
     for page in reader.pages:
         text = page.extract_text() or ""
         raw_lines = text.split("\n")
@@ -372,8 +238,8 @@ def match_and_group(mapping, manifest_data):
             result[best_main][best_sub] += qty
     return result
 
-def generate_pdf_report(result, output_path_or_buf):
-    doc = SimpleDocTemplate(output_path_or_buf)
+def generate_pdf_report(result, output_buf):
+    doc = SimpleDocTemplate(output_buf)
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("title", parent=styles["Title"], alignment=TA_LEFT, fontSize=20, leading=26, spaceAfter=8)
     normal_style = ParagraphStyle("normal", parent=styles["Normal"], alignment=TA_LEFT, fontSize=16, leading=22, spaceAfter=6)
@@ -469,173 +335,82 @@ def process_sort_pipeline(reader, df, selected_couriers=None):
     return writer
 
 # ===============================
-# STREAMLIT UI
+# MAIN UI
 # ===============================
 
 def main():
     st.set_page_config(page_title="Manifest & Label Sorter", page_icon="📋", layout="wide")
-    os.makedirs("data", exist_ok=True)
     
-    # Check Login State
-    if 'logged_in' not in st.session_state:
-        st.session_state['logged_in'] = False
-        
-    if not st.session_state['logged_in']:
-        login_screen()
-        return
-
-    # --- Authenticated View ---
-    st.sidebar.markdown(f"👤 Logged in as: **{st.session_state['username']}**")
-    if st.sidebar.button("Logout"):
-        st.session_state['logged_in'] = False
-        st.rerun()
-        
-    st.sidebar.divider()
+    st.title("📋 Manifest & Label Sorter")
+    st.caption("Stateless Tool: Upload, Process, and Download. No data is stored on our servers.")
     
-    # --- Account Manager (Scoped to User) ---
-    accounts_df = load_accounts()
-
-    st.sidebar.title("🏢 Store Manager")
-
-    # Create new store account
-    with st.sidebar.expander("➕ Create New Store", expanded=accounts_df.empty):
-        new_acc_name = st.sidebar.text_input("Store Name", key="new_acc_name_global", placeholder="e.g. Shop A, Store B")
-        if st.sidebar.button("Create Store", key="btn_create_acc_global"):
-            if new_acc_name.strip():
-                acc_id, err = create_account(new_acc_name)
-                if err:
-                    st.error(err)
-                else:
-                    st.success(f"✅ Store '{new_acc_name}' created!")
-                    st.rerun()
-            else:
-                st.warning("Enter a store name")
-
-    accounts_df = load_accounts()
-
-    if not accounts_df.empty:
-        # Store selector
-        account_options = dict(zip(accounts_df["account_name"], accounts_df["account_id"]))
-        selected_account_name = st.sidebar.selectbox(
-            "Select Store",
-            list(account_options.keys()),
-            key="sel_account_global"
-        )
-        selected_account_id = account_options[selected_account_name]
-        
-        # Delete store
-        with st.sidebar.expander("🗑 Delete Store"):
-            st.warning(f"This will permanently delete **{selected_account_name}** and ALL its data.")
-            if st.sidebar.button("❌ Delete This Store", key="btn_del_account_global"):
-                delete_account(selected_account_id)
-                st.success("Store deleted")
-                st.rerun()
-    else:
-        selected_account_id = None
-        st.sidebar.info("Create a store to start.")
-        st.stop()
-
-    # --- Main UI ---
-    st.title("📋 Mix Feature - Manifest & Label Sorter")
-    st.caption(f"Advanced Manifest Analysis & Label Sorting for **{selected_account_name}**")
-
-    # Path to save training data persistently
-    acc_dir = get_account_dir(selected_account_id)
-    train_save_path = f"{acc_dir}/mix_train.xlsx"
-
-    st.subheader("Generate Grouped Report & Sort Labels")
-    st.write("Match manifest PDF with training Excel to see item counts, and sort your labels in one go!")
+    st.divider()
     
-    has_saved_train = os.path.exists(train_save_path)
-    
-    # 1. Manage Training Excel
-    if has_saved_train:
-        st.info(f"✅ Using saved Training Excel for {selected_account_name}.")
-        with st.expander("📝 View & Edit Saved Training Data"):
-            try:
-                df_t = pd.read_excel(train_save_path, header=None)
-                edited_t = st.data_editor(df_t, use_container_width=True, key="mix_train_editor")
-                if st.button("💾 Save Changes to Training Data"):
-                    edited_t.to_excel(train_save_path, index=False, header=False)
-                    st.success("Changes saved!")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Error reading saved file: {e}")
-        
-        if st.button("🗑️ Delete Saved Training Excel"):
-            os.remove(train_save_path)
-            st.rerun()
-
-    # Upload Training Excel
+    # 1. Upload Training Excel
+    st.subheader("Step 1: Upload Training Data")
     train_file = st.file_uploader(
-        "📂 Upload Training Excel" if not has_saved_train else "🔄 Replace Training Excel", 
+        "📂 Upload Training Excel (Required for both features)", 
         type=["xlsx"], 
         help="Upload the mapping file containing main product, sub-variant, and SKUs."
     )
     
-    if train_file:
-        with open(train_save_path, "wb") as f:
-            f.write(train_file.getbuffer())
-        st.success(f"✅ Training Excel replaced and saved for {selected_account_name}!")
-        st.rerun()
-
-    target_train = train_save_path if has_saved_train else None
-
-    # 2. Independent Actions
+    if not train_file:
+        st.info("Please upload your Training Excel file to begin.")
+        st.stop()
+        
+    st.success("✅ Training Data loaded for this session.")
+    
     st.divider()
+    
+    # 2. Independent Actions
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("📊 1. Generate Report")
-        manifest_file = st.file_uploader("📄 Manifest PDF", type=["pdf"], key="mix_manifest")
+        st.subheader("📊 1. Generate Grouped Report")
+        st.write("Match manifest PDF with training Excel to see item counts.")
+        manifest_file = st.file_uploader("📄 Upload Manifest PDF", type=["pdf"], key="mix_manifest")
         
-        if st.button("🚀 Generate Grouped Report"):
-            if target_train and manifest_file:
+        if st.button("🚀 Generate Report"):
+            if manifest_file:
                 with st.spinner("Analyzing Manifest..."):
                     try:
-                        mapping = train_from_excel(target_train)
+                        mapping = train_from_excel(train_file)
                         manifest_data = extract_from_pdf(manifest_file)
                         result = match_and_group(mapping, manifest_data)
                         
                         output_buf = io.BytesIO()
                         generate_pdf_report(result, output_buf)
                         
-                        # Save to account folder
-                        output_dir = os.path.join(acc_dir, "mix_outputs")
-                        os.makedirs(output_dir, exist_ok=True)
+                        st.success("✅ Report generated!")
                         date_str = datetime.now().strftime('%Y-%m-%d')
-                        file_name = f"{selected_account_name}_{date_str}_Report.pdf".replace(" ", "_")
-                        save_path = os.path.join(output_dir, file_name)
-                        
-                        with open(save_path, "wb") as f:
-                            f.write(output_buf.getvalue())
-                        
-                        st.success(f"✅ Report generated and saved to {selected_account_name}'s folder!")
                         st.download_button(
                             "📥 Download Report",
                             output_buf.getvalue(),
-                            file_name=file_name,
+                            file_name=f"Manifest_Report_{date_str}.pdf",
                             mime="application/pdf"
                         )
                     except Exception as e:
                         st.error(f"Error: {e}")
             else:
-                st.warning("Please ensure Training Excel is uploaded and Manifest PDF is provided.")
+                st.warning("Please upload a Manifest PDF.")
                 
     with col2:
         st.subheader("🏷️ 2. Sort Labels")
-        label_pdf = st.file_uploader("📄 Label PDF", type=["pdf"], key="mix_label_pdf")
+        st.write("Filter and sort your labels based on the training data.")
+        label_pdf = st.file_uploader("📄 Upload Label PDF", type=["pdf"], key="mix_label_pdf")
         couriers = st.multiselect(
-            "🚚 Filter by Courier (Leave empty for ALL)",
+            "🚚 Filter by Courier (Optional)",
             ["Valmo", "ValmoPlus", "Ecom Express", "Xpress Bees", "Delhivery", "Shadowfax"]
         )
         
-        if st.button("🔄 Sort & Download Labels"):
-            if target_train and label_pdf:
+        if st.button("🔄 Sort Labels"):
+            if label_pdf:
                 with st.spinner("Sorting labels..."):
                     try:
                         reader = PdfReader(label_pdf)
-                        df_train = pd.read_excel(target_train)
+                        # Re-read train_file to get DF
+                        train_file.seek(0)
+                        df_train = pd.read_excel(train_file)
                         
                         writer = process_sort_pipeline(reader, df_train, couriers)
                         
@@ -643,22 +418,12 @@ def main():
                             output_buf = io.BytesIO()
                             writer.write(output_buf)
                             
-                            # Save to account folder
-                            output_dir = os.path.join(acc_dir, "mix_outputs")
-                            os.makedirs(output_dir, exist_ok=True)
+                            st.success("✅ Labels sorted!")
                             date_str = datetime.now().strftime('%Y-%m-%d')
-                            courier_str = "_".join(couriers) if couriers else "ALL"
-                            file_name = f"{selected_account_name}_{date_str}_{courier_str}_Labels.pdf".replace(" ", "_")
-                            save_path = os.path.join(output_dir, file_name)
-                            
-                            with open(save_path, "wb") as f:
-                                f.write(output_buf.getvalue())
-                                
-                            st.success(f"✅ Labels sorted and saved to {selected_account_name}'s folder!")
                             st.download_button(
                                 "📥 Download Sorted Labels",
                                 output_buf.getvalue(),
-                                file_name=file_name,
+                                file_name=f"Sorted_Labels_{date_str}.pdf",
                                 mime="application/pdf"
                             )
                         else:
@@ -666,7 +431,7 @@ def main():
                     except Exception as e:
                         st.error(f"Error: {e}")
             else:
-                st.warning("Please ensure Training Excel is uploaded and Label PDF is provided.")
+                st.warning("Please upload a Label PDF.")
 
 if __name__ == "__main__":
     main()
