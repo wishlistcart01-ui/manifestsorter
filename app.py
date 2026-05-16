@@ -33,7 +33,8 @@ def normalize_sku_key(text):
     if text is None:
         return ""
     s = unicodedata.normalize("NFC", str(text)).strip()
-    s = re.sub(r"\s+", " ", s)
+    # Treat all symbols (_, -, space) as same for matching
+    s = re.sub(r"[^a-zA-Z0-9]", "", s)
     return s.casefold()
 
 def _mostly_digits(s):
@@ -81,26 +82,38 @@ def variants_match(norm_variant, norm_manifest):
 # ===============================
 
 def train_from_excel(excel_file):
+    excel_file.seek(0)
     df = pd.read_excel(excel_file, header=None)
     main_row = df.iloc[0]
     sub_row = df.iloc[1]
     mapping = []
 
     for col in df.columns:
-        main = str(main_row[col]).strip()
-        sub = str(sub_row[col]).strip()
-        if main == 'nan' or sub == 'nan':
+        main_val = str(main_row[col]).strip()
+        sub_val = str(sub_row[col]).strip()
+        
+        # If both are empty, check if there are any variants in this column
+        variants_raw = df.iloc[2:, col].dropna().tolist()
+        if not variants_raw:
             continue
-        variants = df.iloc[2:, col].dropna().tolist()
+            
+        # Handle missing headers instead of skipping
+        main_name = main_val.upper() if main_val != 'nan' else f"CATALOG {col+1}"
+        sub_name = sub_val.upper() if sub_val != 'nan' else "GENERAL"
+        
         norm_variants = []
-        for v in variants:
+        for v in variants_raw:
             k = normalize_sku_key(v)
             if k and k not in norm_variants:
                 norm_variants.append(k)
+        
+        if not norm_variants:
+            continue
+            
         norm_variants.sort(key=len, reverse=True)
         mapping.append({
-            "main": main.upper(),
-            "sub": sub.upper(),
+            "main": main_name,
+            "sub": sub_name,
             "variants": norm_variants,
         })
     return mapping
@@ -134,23 +147,22 @@ def _strip_logistics_prefix(prefix):
     return ' '.join(parts[i:]).strip()
 
 def _try_picklist_line(line):
-    m = re.search(r"^(.+)\s+Free\s+Size\s+(\d+)\s*$", line.strip(), re.I)
+    # Match SKU followed by Size and Qty
+    # Example: "1 NEW_mira_fabric Free Size 1" or "2 DRESS Size M 5"
+    m = re.search(r"^(.+?)\s+(?:Free\s+Size|Size\s+[SMLX]+|Size\s+.*?)\s+(\d+)\s*$", line.strip(), re.I)
     if not m:
         return None
-    body, qty_s = m.group(1).strip(), m.group(2)
-    if not body:
+    prefix, qty_s = m.group(1).strip(), m.group(2)
+    if not prefix:
         return None
-    parts = body.split()
-    if not parts:
-        return None
-    sku = parts[0] if len(parts) == 1 else " ".join(parts[:-1]).strip()
-    low = sku.casefold()
-    if low in ("sku", "total", "quantity", "size", "packed") or not sku:
+    sku = _strip_logistics_prefix(prefix)
+    if not sku:
         return None
     return sku, int(qty_s)
 
 def _try_courier_tail(line):
-    m = re.search(r'(.+)\s+(\d{1,7})\s+Free\s*Size\s*$', line, re.I)
+    # Example: "DRESS 1 Free Size"
+    m = re.search(r'(.+?)\s+(\d{1,7})\s+(?:Free\s*Size|Size\s*[SMLX]+)\s*$', line, re.I)
     if not m:
         return None
     prefix, qty_s = m.group(1).strip(), m.group(2)
@@ -221,7 +233,10 @@ def extract_from_pdf(pdf_file):
 def match_and_group(mapping, manifest_data):
     result = defaultdict(lambda: defaultdict(int))
     for raw_sku, qty in manifest_data:
-        nm = normalize_sku_key(raw_sku)
+        # Strip system IDs in parentheses before matching
+        # Example: "SKU-NAME (12345)" -> "SKU-NAME"
+        clean_sku = re.sub(r"\s*\(\d+\)\s*$", "", raw_sku).strip()
+        nm = normalize_sku_key(clean_sku)
         if not nm:
             continue
         best_main, best_sub, best_len = None, None, -1
@@ -278,36 +293,65 @@ def extract_label_data(text):
             courier = value
             break
     sku = None
-    order_match = re.search(r"Order\s*No\.?\s*(.*?)\s*(Free\s*Size|Size)", text, re.IGNORECASE | re.DOTALL)
+    sku = None
+    # Improved regex to handle SKUs that might contain the word "SIZE" 
+    # and look for the actual "Size" field marker (usually followed by a colon or specific keywords)
+    order_match = re.search(r"Order\s*No\.?\s*(.*?)\s*(?=Free\s*Size|Size\s*:|Size\s+[SMLX]+)", text, re.IGNORECASE | re.DOTALL)
     if order_match:
         sku = " ".join(order_match.group(1).split())
     if not sku:
-        sku_match = re.search(r"SKU\s*(.*?)\s*Size", text, re.IGNORECASE | re.DOTALL)
+        sku_match = re.search(r"SKU\s*(.*?)\s*(?=Size\s*:|Size\s+[SMLX]+|Free\s*Size)", text, re.IGNORECASE | re.DOTALL)
         if sku_match:
             sku = " ".join(sku_match.group(1).split())
     return sku, qty, courier
 
-def get_sorted_indices(pages, df):
+def get_sorted_indices(pages, mapping):
     final = []
     used = set()
+    
+    # 1. First, prioritize items with quantity > 1 (Combo/Bulk)
     for p in pages:
         if p["qty"] > 1:
             final.append(p["index"])
             used.add(p["index"])
-    for col in df.columns:
-        skus = df[col].dropna().astype(str).str.strip().tolist()
-        for sku in skus:
-            for p in pages:
-                if p["index"] not in used and p["sku"]:
-                    if p["sku"].lower() == sku.lower():
-                        final.append(p["index"])
-                        used.add(p["index"])
+            
+    # 2. Assign best matches to all remaining pages
+    for p in pages:
+        if p["index"] in used:
+            continue
+            
+        nm = normalize_sku_key(p["sku"])
+        if not nm:
+            p["match_info"] = None
+            continue
+            
+        best_match_idx = -1
+        best_len = -1
+        
+        for idx, item in enumerate(mapping):
+            for v in item["variants"]:
+                if variants_match(v, nm):
+                    if len(v) > best_len:
+                        best_len = len(v)
+                        best_match_idx = idx
+        
+        p["match_info"] = best_match_idx if best_match_idx != -1 else None
+
+    # 3. Sort by Excel Mapping order (Column by Column)
+    for idx in range(len(mapping)):
+        for p in pages:
+            if p["index"] not in used and p["match_info"] == idx:
+                final.append(p["index"])
+                used.add(p["index"])
+                
+    # 4. Add remaining (Unmatched) pages
     for p in pages:
         if p["index"] not in used:
             final.append(p["index"])
+            
     return final
 
-def process_sort_pipeline(reader, df, selected_couriers=None):
+def process_sort_pipeline(reader, mapping, selected_couriers=None):
     all_pages = []
     for i, page in enumerate(reader.pages):
         text = page.extract_text() or ""
@@ -323,7 +367,7 @@ def process_sort_pipeline(reader, df, selected_couriers=None):
     if not pages:
         return None
 
-    indices = get_sorted_indices(pages, df)
+    indices = get_sorted_indices(pages, mapping)
     writer = PdfWriter()
     for idx in indices:
         if idx < len(reader.pages):
@@ -360,6 +404,16 @@ def main():
         
     st.success("✅ Training Data loaded for this session.")
     
+    with st.sidebar:
+        st.header("🛠️ Debug Tools")
+        show_mapping = st.checkbox("Show Loaded Mapping", value=False)
+        show_extraction = st.checkbox("Show Extracted SKUs from PDF", value=False)
+        
+    if show_mapping:
+        with st.expander("Loaded Product Mapping", expanded=True):
+            mapping_data = train_from_excel(train_file)
+            st.write(mapping_data)
+    
     st.divider()
     
     # 2. Independent Actions
@@ -382,6 +436,11 @@ def main():
                         generate_pdf_report(result, output_buf)
                         
                         st.success("✅ Report generated!")
+                        
+                        if show_extraction:
+                            with st.expander("Extracted Manifest Data", expanded=False):
+                                st.write(manifest_data)
+                                
                         date_str = datetime.now().strftime('%Y-%m-%d')
                         st.download_button(
                             "📥 Download Report",
@@ -408,17 +467,25 @@ def main():
                 with st.spinner("Sorting labels..."):
                     try:
                         reader = PdfReader(label_pdf)
-                        # Re-read train_file to get DF
-                        train_file.seek(0)
-                        df_train = pd.read_excel(train_file)
+                        mapping = train_from_excel(train_file)
                         
-                        writer = process_sort_pipeline(reader, df_train, couriers)
+                        writer = process_sort_pipeline(reader, mapping, couriers)
                         
                         if writer:
                             output_buf = io.BytesIO()
                             writer.write(output_buf)
                             
                             st.success("✅ Labels sorted!")
+                            
+                            if show_extraction:
+                                with st.expander("Extracted Label Data", expanded=False):
+                                    debug_pages = []
+                                    for i, page in enumerate(reader.pages):
+                                        t = page.extract_text() or ""
+                                        s, q, c = extract_label_data(t)
+                                        debug_pages.append({"page": i+1, "sku": s, "qty": q, "courier": c})
+                                    st.write(debug_pages)
+                                    
                             date_str = datetime.now().strftime('%Y-%m-%d')
                             st.download_button(
                                 "📥 Download Sorted Labels",
