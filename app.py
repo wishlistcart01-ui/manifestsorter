@@ -25,7 +25,7 @@ _MAX_MANIFEST_SUFFIX_OVER_VARIANT = 14
 
 _HEADER_RE = re.compile(
     r'^\s*(Picklist|Supplier\s+Name|Date\s*:|SKU\s+Color|S\.\s*No\.|Sub\s+Order|'
-    r'AWB|Courier\s*:|Total\s+Quantity|Qty\.?\s*Size|Packed)\b',
+    r'AWB|Courier\s*:|Total\s+Quantity|Qty\.?\s*Size|Packed)',
     re.I,
 )
 
@@ -147,9 +147,14 @@ def _strip_logistics_prefix(prefix):
     return ' '.join(parts[i:]).strip()
 
 def _try_picklist_line(line):
-    # Match SKU followed by Size and Qty
-    # Example: "1 NEW_mira_fabric Free Size 1" or "2 DRESS Size M 5"
-    m = re.search(r"^(.+?)\s+(?:Free\s+Size|Size\s+[SMLX]+|Size\s+.*?)\s+(\d+)\s*$", line.strip(), re.I)
+    # Picklist format: [N]SKU_NAME COLOR_WORD Free Size QTY
+    # COLOR_WORD is always a single word (Blue, Red, Multicolor, etc.) before the size info.
+    # We capture SKU and COLOR separately so the color is not appended to the SKU.
+    # Example: "(1)rangoli_blue_2 Blue Free Size 5" -> sku="(1)rangoli_blue_2", qty=5
+    m = re.search(
+        r"^(.+?)\s+\S+\s+(?:Free\s+Size|Size\s+[SMLX]+(?:\d+)?|Size\s+\S+)\s+(\d+)\s*$",
+        line.strip(), re.I
+    )
     if not m:
         return None
     prefix, qty_s = m.group(1).strip(), m.group(2)
