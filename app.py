@@ -84,6 +84,10 @@ def variants_match(norm_variant, norm_manifest):
 def train_from_excel(excel_file):
     excel_file.seek(0)
     df = pd.read_excel(excel_file, header=None)
+    
+    # Ignore the first row as requested
+    df = df.iloc[1:].reset_index(drop=True)
+    
     main_row = df.iloc[0]
     sub_row = df.iloc[1]
     mapping = []
